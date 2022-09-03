@@ -1,29 +1,28 @@
+import argparse
+import os
+import re
+import time
+from contextlib import nullcontext
+from itertools import islice
+from random import randint
+import mimetypes
 import gradio as gr
 import numpy as np
 import torch
-from torchvision.utils import make_grid
-import os, re
 from PIL import Image
-import torch
-import numpy as np
-from random import randint
+from einops import rearrange, repeat
 from omegaconf import OmegaConf
-from PIL import Image
-from tqdm import tqdm, trange
-from itertools import islice
-from einops import rearrange
-from torchvision.utils import make_grid
-import time
 from pytorch_lightning import seed_everything
 from torch import autocast
-from einops import rearrange, repeat
-from contextlib import nullcontext
-from ldm.util import instantiate_from_config
+from torchvision.utils import make_grid
+from tqdm import tqdm, trange
 from transformers import logging
-import pandas as pd
+
+from ldm.util import instantiate_from_config
 from optimUtils import split_weighted_subprompts, logger
+
 logging.set_verbosity_error()
-import mimetypes
+
 mimetypes.init()
 mimetypes.add_type("application/javascript", ".js")
 
@@ -43,7 +42,6 @@ def load_model_from_config(ckpt, verbose=False):
 
 
 def load_img(image, h0, w0):
-
     image = image.convert("RGB")
     w, h = image.size
     print(f"loaded input image of size ({w}, {h})")
@@ -59,61 +57,26 @@ def load_img(image, h0, w0):
     image = torch.from_numpy(image)
     return 2.0 * image - 1.0
 
-config = "optimizedSD/v1-inference.yaml"
-ckpt = "models/ldm/stable-diffusion-v1/model.ckpt"
-sd = load_model_from_config(f"{ckpt}")
-li, lo = [], []
-for key, v_ in sd.items():
-    sp = key.split(".")
-    if (sp[0]) == "model":
-        if "input_blocks" in sp:
-            li.append(key)
-        elif "middle_block" in sp:
-            li.append(key)
-        elif "time_embed" in sp:
-            li.append(key)
-        else:
-            lo.append(key)
-for key in li:
-    sd["model1." + key[6:]] = sd.pop(key)
-for key in lo:
-    sd["model2." + key[6:]] = sd.pop(key)
-
-config = OmegaConf.load(f"{config}")
-
-model = instantiate_from_config(config.modelUNet)
-_, _ = model.load_state_dict(sd, strict=False)
-model.eval()
-
-modelCS = instantiate_from_config(config.modelCondStage)
-_, _ = modelCS.load_state_dict(sd, strict=False)
-modelCS.eval()
-
-modelFS = instantiate_from_config(config.modelFirstStage)
-_, _ = modelFS.load_state_dict(sd, strict=False)
-modelFS.eval()
-del sd
 
 def generate(
-    image,
-    prompt,
-    strength,
-    ddim_steps,
-    n_iter,
-    batch_size,
-    Height,
-    Width,
-    scale,
-    ddim_eta,
-    unet_bs,
-    device,
-    seed,
-    outdir,
-    img_format,
-    turbo,
-    full_precision,
+        image,
+        prompt,
+        strength,
+        ddim_steps,
+        n_iter,
+        batch_size,
+        Height,
+        Width,
+        scale,
+        ddim_eta,
+        unet_bs,
+        device,
+        seed,
+        outdir,
+        img_format,
+        turbo,
+        full_precision,
 ):
-
     if seed == "":
         seed = randint(0, 1000000)
     seed = int(seed)
@@ -121,7 +84,7 @@ def generate(
 
     # Logging
     sampler = "ddim"
-    logger(locals(), log_csv = "logs/img2img_gradio_logs.csv")
+    logger(locals(), log_csv="logs/img2img_gradio_logs.csv")
 
     init_image = load_img(image, Height, Width).to(device)
     model.unet_bs = unet_bs
@@ -205,18 +168,17 @@ def generate(
                     )
                     # decode it
                     samples_ddim = model.sample(
-                                    t_enc,
-                                    c,
-                                    z_enc,
-                                    unconditional_guidance_scale=scale,
-                                    unconditional_conditioning=uc,
-                                    sampler = sampler
+                        t_enc,
+                        c,
+                        z_enc,
+                        unconditional_guidance_scale=scale,
+                        unconditional_conditioning=uc,
+                        sampler=sampler
                     )
 
                     modelFS.to(device)
                     print("saving images")
                     for i in range(batch_size):
-
                         x_samples_ddim = modelFS.decode_first_stage(samples_ddim[i].unsqueeze(0))
                         x_sample = torch.clamp((x_samples_ddim + 1.0) / 2.0, min=0.0, max=1.0)
                         all_samples.append(x_sample.to("cpu"))
@@ -247,37 +209,77 @@ def generate(
     grid = 255.0 * rearrange(grid, "c h w -> h w c").cpu().numpy()
 
     txt = (
-        "Samples finished in "
-        + str(round(time_taken, 3))
-        + " minutes and exported to \n"
-        + sample_path
-        + "\nSeeds used = "
-        + seeds[:-1]
+            "Samples finished in "
+            + str(round(time_taken, 3))
+            + " minutes and exported to \n"
+            + sample_path
+            + "\nSeeds used = "
+            + seeds[:-1]
     )
     return Image.fromarray(grid.astype(np.uint8)), txt
 
 
-demo = gr.Interface(
-    fn=generate,
-    inputs=[
-        gr.Image(tool="editor", type="pil"),
-        "text",
-        gr.Slider(0, 1, value=0.75),
-        gr.Slider(1, 1000, value=50),
-        gr.Slider(1, 100, step=1),
-        gr.Slider(1, 100, step=1),
-        gr.Slider(64, 4096, value=512, step=64),
-        gr.Slider(64, 4096, value=512, step=64),
-        gr.Slider(0, 50, value=7.5, step=0.1),
-        gr.Slider(0, 1, step=0.01),
-        gr.Slider(1, 2, value=1, step=1),
-        gr.Text(value="cuda"),
-        "text",
-        gr.Text(value="outputs/img2img-samples"),
-        gr.Radio(["png", "jpg"], value='png'),
-        "checkbox",
-        "checkbox",
-    ],
-    outputs=["image", "text"],
-)
-demo.launch()
+if __name__ == '__main__':
+    parser = argparse.ArgumentParser(description='img2img using gradio')
+    parser.add_argument('--config_path', default="optimizedSD/v1-inference.yaml", type=str, help='config path')
+    parser.add_argument('--ckpt_path', default="models/ldm/stable-diffusion-v1/model.ckpt", type=str, help='ckpt path')
+    args = parser.parse_args()
+    config = args.config_path
+    ckpt = args.ckpt_path
+    sd = load_model_from_config(f"{ckpt}")
+    li, lo = [], []
+    for key, v_ in sd.items():
+        sp = key.split(".")
+        if (sp[0]) == "model":
+            if "input_blocks" in sp:
+                li.append(key)
+            elif "middle_block" in sp:
+                li.append(key)
+            elif "time_embed" in sp:
+                li.append(key)
+            else:
+                lo.append(key)
+    for key in li:
+        sd["model1." + key[6:]] = sd.pop(key)
+    for key in lo:
+        sd["model2." + key[6:]] = sd.pop(key)
+
+    config = OmegaConf.load(f"{config}")
+
+    model = instantiate_from_config(config.modelUNet)
+    _, _ = model.load_state_dict(sd, strict=False)
+    model.eval()
+
+    modelCS = instantiate_from_config(config.modelCondStage)
+    _, _ = modelCS.load_state_dict(sd, strict=False)
+    modelCS.eval()
+
+    modelFS = instantiate_from_config(config.modelFirstStage)
+    _, _ = modelFS.load_state_dict(sd, strict=False)
+    modelFS.eval()
+    del sd
+
+    demo = gr.Interface(
+        fn=generate,
+        inputs=[
+            gr.Image(tool="editor", type="pil"),
+            "text",
+            gr.Slider(0, 1, value=0.75),
+            gr.Slider(1, 1000, value=50),
+            gr.Slider(1, 100, step=1),
+            gr.Slider(1, 100, step=1),
+            gr.Slider(64, 4096, value=512, step=64),
+            gr.Slider(64, 4096, value=512, step=64),
+            gr.Slider(0, 50, value=7.5, step=0.1),
+            gr.Slider(0, 1, step=0.01),
+            gr.Slider(1, 2, value=1, step=1),
+            gr.Text(value="cuda"),
+            "text",
+            gr.Text(value="outputs/img2img-samples"),
+            gr.Radio(["png", "jpg"], value='png'),
+            "checkbox",
+            "checkbox",
+        ],
+        outputs=["image", "text"],
+    )
+    demo.launch(share=True)
